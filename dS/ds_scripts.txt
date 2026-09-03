@@ -1,0 +1,183 @@
+================================================================================================================================================
+#### Prepare the data
+================================================================================================================================================
+# Data sources
+https://academic.oup.com/gbe/article/17/1/evaf009/7993349?login=false #Capsella orientalis
+https://phytozome-next.jgi.doe.gov/info/Cgrandiflora_v1_1 #Capsella grandiflora
+https://www.ncbi.nlm.nih.gov/datasets/genome/GCA_978657495.1/ #Arabidopsis thaliana
+
+================================================================================================================================================
+#### Clean the protein and CDS files
+================================================================================================================================================
+### Keep only the longest isoform: script from https://github.com/NBISweden/AGAT/blob/master/bin/agat_sp_keep_longest_isoform.pl 
+agat_sp_keep_longest_isoform.pl --gff Athaliana_gff.gff -o Athaliana_gff_filtered.gff
+agat_sp_keep_longest_isoform.pl --gff Cgrandiflora_genome_annotation.gff -o Cgrandiflora_gff_filtered.gff
+agat_sp_keep_longest_isoform.pl --gff Corientalis_genome_annotation.gff -o Corientalis_gff_filtered.gff
+
+### Filter cds and proteins using this data from the gff file. 
+#### Athal_gff. Retrieve cds, then get the protein IDs from the gff file.
+awk -F'\t' '$3 == "CDS" {
+    match($9, /protein_id=([^;]+)/, a);
+    if (a[1]) print a[1]
+}' Athaliana_gff_filtered.gff | sort -u > Athaliana_longest_cds_proteins_ID
+
+#### Athal_prots
+sed 's/^>\([^ ]*\).*/>\1/' Athaliana_protein.faa > Athaliana_protein_cleaned.fa
+seqkit grep -f ./Athaliana_longest_cds_proteins_ID ./Athaliana_protein_cleaned.fa | sed 's/^>\([^ ]*\).*/>\1/' > Athal_proteins_filtered.fa
+
+#### Cgran_gff. Retrieve cds, then get the protein IDs from the gff file.
+awk -F'\t' '$3 == "CDS" {
+    match($9, /Parent=([^;]+)/, a);
+    if (a[1]) print a[1]
+}' Cgrandiflora_gff_filtered.gff | sort -u | sed 's/\.v[0-9.]*$//' > Cgrandiflora_longest_cds_proteins_ID
+
+#### Cgran_prots
+sed '/^>/ s/\.p.*//' Cgrandiflora_protein.faa > Cgrandiflora_protein_clean.faa
+seqkit grep -f ./Cgrandiflora_longest_cds_proteins_ID Cgrandiflora_protein_clean.faa > Cgran_proteins_filtered.fa
+
+#### Corie_gff. Retrieve cds, then get the protein IDs from the gff file.
+awk -F'\t' '$3 == "CDS" {
+    match($9, /Name=([^;]+)/, a);
+    if (a[1]) print a[1]
+}' Corientalis_gff_filtered.gff | sort -u | sed 's/^.*\.g/g/' > Corientalis_longest_cds_proteins_ID
+
+#### Corie_prots
+sed '/^>/ s/^>.*\.g/>g/' Corientalis_protein.faa > Corientalis_protein_clean.faa
+seqkit grep -f ./Corientalis_longest_cds_proteins_ID Corientalis_protein_clean.faa > Corie_proteins_filtered.fa
+
+### fix Athaliana genome seq names
+sed 's/^>ENA|[^|]*|/>/' Athaliana_genome.fasta > Athaliana_genome.fixed.fasta
+
+================================================================================================================================================
+#### Run OrthoFinder
+================================================================================================================================================
+orthofinder -f orthofinder_input -t 16 -a 16
+
+### retrieve 1:1:1 orthologs
+awk 'BEGIN{OFS="\t"} NR==FNR {keep[$1]; next} FNR==1 || ($1 in keep)' Orthogroups_SingleCopyOrthologues.txt Orthogroups.tsv > single_copy_orthogroups
+
+================================================================================================================================================
+#### Retrieve proteins and CDS needed for orthologs comparison
+================================================================================================================================================
+#Make sure the spacing is consistent, then retrieve the orthologs per species
+
+awk '{print $2}' single_copy_orthogroups > Athal_orthologs
+awk '{print $3}' single_copy_orthogroups > Cgran_orthologs
+awk '{print $4}' single_copy_orthogroups > Corie_orthologs
+
+#Extract the proteins
+seqkit grep -f ./Athal_orthologs Athal_proteins_filtered.fa > Athal_orthologs.fa
+seqkit grep -f ./Cgran_orthologs Cgran_proteins_filtered.fa > Cgran_orthologs.fa
+seqkit grep -f ./Corie_orthologs Corie_proteins_filtered.fa > Corie_orthologs.fa
+
+#Extract their cds
+## Athal:
+seqkit grep -f ./Athal_orthologs ./Athaliana_cds_proteinIDs.fa > Athal_cds_filtered.fa
+
+## Cgran:
+sed '/^>/ s/\.v[0-9.]*$//' Cgrandiflora_cds_clean.fa > Cgrandiflora_cds_clean2.fa
+seqkit grep -f ./Cgran_orthologs ./Cgrandiflora_cds_clean2.fa > Cgran_cds_filtered.fa
+
+##Corie:
+sed '/^>/ s/^>.*\.g/>g/' Corientalis_cds.fa > Corientalis_cds_cleaned.fa
+seqkit grep -f ./Corie_orthologs ./Corientalis_cds_cleaned.fa > Corie_cds_filtered.fa
+
+================================================================================================================================================
+#### Protein and CDS alignements
+================================================================================================================================================
+#Index files
+samtools faidx Athal_cds_filtered.fa
+samtools faidx Cgran_cds_filtered.fa
+samtools faidx Corie_cds_filtered.fa
+
+samtools faidx Athal_orthologs.fa
+samtools faidx Cgran_orthologs.fa
+samtools faidx Corie_orthologs.fa
+
+./Pairwise_align.sh
+
+================================================================================================================================================
+#### Get mean dS for a phylogeny-based approach
+================================================================================================================================================
+## Create a concatenate gene file for iqtree
+python paml_to_phylip.py
+
+## Give simple names to the species in the .phy files and .paml files
+mkdir renamed_phy
+for f in codon_aln/*.phy; do
+    sed \
+    -e 's/^CAO.*/Athal/' \
+    -e 's/^Cagra.*/Cgran/' \
+    -e 's/^g[0-9].*/Corie/' \
+    "$f" > renamed_phy/$(basename "$f")
+done
+
+mkdir renamed_codon
+for f in codon_aln/*.paml; do
+    sed \
+    -e 's/^CAO.*/Athal/' \
+    -e 's/^Cagra.*/Cgran/' \
+    -e 's/^g[0-9].*/Corie/' \
+    "$f" > renamed_codon/$(basename "$f")
+done
+
+## Use amas.py to concatenate the .phy files and run iqtree to get a tree for codeml
+AMAS.py concat \
+    -i renamed_phy/*.phy \
+    -f phylip \
+    -d dna \
+    -u phylip \
+    -c 32 \
+    -t amas_concat.phy
+
+iqtree -s amas_concat.phy -st CODON -m MFP -nt AUTO
+
+##### Run codeml with that tree; Create results directory
+mkdir -p results_codeml 
+
+## Set the treefile argument. Note that the treefile was modified to include the close relaitonship between C. grandiflora and C. orientalis, as shown in the treefile.
+TREE="amas_concat.treefile"
+
+##### Run codeml on .paml files with the tree from iqtree. The control file is codeml_phylo.ctl, which is a modified version of codeml.ctl. 
+for phy_file in ./renamed_codon/*.paml; do
+
+    base_name=$(basename "$phy_file" .paml)
+
+    # Create control file
+    sed -e "s|SEQFILE_PLACEHOLDER|$phy_file|" \
+        -e "s|TREE_PLACEHOLDER|$TREE|" \
+        -e "s|OUTPUT_PLACEHOLDER|results_codeml/${base_name}|" \
+        codeml_phylo.ctl > "${base_name}.ctl"
+
+    echo "Running codeml for $base_name"
+
+    codeml "${base_name}.ctl" > logs_${base_name}.txt 2>&1
+
+    # Cleanup
+    rm "${base_name}.ctl"
+    rm -f 2ML.dN 2ML.dS 2ML.t rub lnf
+
+done
+
+## Analyse the resulting data, first by creating a ds table
+echo -e "file\tAthal\tCgran\tCorie\tInternal" > codeml_dS.tsv
+
+for f in results_codeml/*.txt; do
+    tree=$(awk '/dS tree:/{getline; print}' "$f")
+
+    vals=$(echo "$tree" | sed -E 's/[():,]/ /g' | awk '{print $2,$4,$6,$8}')
+
+    echo -e "$(basename "$f")\t$(echo $vals | tr ' ' '\t')" >> codeml_dS.tsv
+done
+
+## compute the mean dS for each branch
+awk 'NR>1 {
+    athal+=$2; cgran+=$3; corie+=$4; internal+=$5; n++
+}
+END {
+    print "Branch\tMean_dS"
+    print "Athal\t" athal/n
+    print "Cgran\t" cgran/n
+    print "Corie\t" corie/n
+    print "Internal\t" internal/n
+}' codeml_dS.tsv
