@@ -1,7 +1,7 @@
 # Reproductive_modes_mutation_rate
 Data and code related to the paper "Reproductive mode and the evolution of mutation rate"
 
-# Folders content:
+## Folders content:
 
 1. dS folder:
 Contains one file ("ds_scripts.txt") describing the steps to obtain the dS values. 
